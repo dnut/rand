@@ -1,11 +1,13 @@
 use core::ops::{Add, AddAssign, BitXor};
 
-pub(crate) const BLOCK: usize = 16;
-pub(crate) const BLOCK64: u64 = BLOCK as u64;
-const LOG2_BUFBLOCKS: u64 = 2;
-const BUFBLOCKS: u64 = 1 << LOG2_BUFBLOCKS;
-pub(crate) const BUFSZ64: u64 = BLOCK64 * BUFBLOCKS;
-pub(crate) const BUFSZ: usize = BUFSZ64 as usize;
+mod const_calculator {
+    const BLOCK: usize = 16;
+    const BLOCK64: u64 = BLOCK as u64;
+    const LOG2_BUFBLOCKS: u64 = 2;
+    const BUFBLOCKS: u64 = 1 << LOG2_BUFBLOCKS;
+    pub(super) const BUFSZ64: u64 = BLOCK64 * BUFBLOCKS;
+}
+const BUFSZ: usize = const_calculator::BUFSZ64 as usize;
 
 pub trait Store<S> {
     /// # Safety
@@ -31,17 +33,14 @@ impl ChaCha20Rng {
     }
 
     // impl RngCore for ChaCha20Rng {
-    //     #[inline]
-    //     fn next_u32(&mut self) -> u32 {
-    //         self.rng.next_u32()
-    //     }
+    fn next_u32(&mut self) -> u32 {
+        self.rng.next_u32()
+    }
 
-    //     #[inline]
-    //     fn next_u64(&mut self) -> u64 {
-    //         self.rng.next_u64()
-    //     }
+    fn next_u64(&mut self) -> u64 {
+        self.rng.next_u64()
+    }
 
-    //     #[inline]
     fn fill_bytes(&mut self, bytes: &mut [u8]) {
         self.rng.fill_bytes(bytes)
     }
@@ -61,6 +60,40 @@ impl BlockRng {
             core,
             index: results_empty.as_ref().len(),
             results: results_empty,
+        }
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        if self.index >= self.results.as_ref().len() {
+            self.generate_and_set(0);
+        }
+
+        let value = self.results.as_ref()[self.index];
+        self.index += 1;
+        value
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let read_u64 = |results: &[u32], index| {
+            let data = &results[index..=index + 1];
+            u64::from(data[1]) << 32 | u64::from(data[0])
+        };
+
+        let len = self.results.as_ref().len();
+
+        let index = self.index;
+        if index < len - 1 {
+            self.index += 2;
+            // Read an u64 from the current index
+            read_u64(self.results.as_ref(), index)
+        } else if index >= len {
+            self.generate_and_set(2);
+            read_u64(self.results.as_ref(), 0)
+        } else {
+            let x = u64::from(self.results.as_ref()[len - 1]);
+            self.generate_and_set(1);
+            let y = u64::from(self.results.as_ref()[0]);
+            (y << 32) | x
         }
     }
 
@@ -652,7 +685,7 @@ mod test {
     use rand_core::{RngCore, SeedableRng};
 
     #[test]
-    fn basic_test() {
+    fn hardcoded_fill_bytes_test() {
         // type ChaChaRng = super::super::ChaCha20Rng;
         type ChaChaRng = super::ChaCha20Rng;
         let rng = &mut ChaChaRng::from_seed([0; 32]);
@@ -666,17 +699,35 @@ mod test {
     }
 
     #[test]
-    fn better_test() {
+    fn dynamic_fill_bytes_test() {
         type Reference = super::super::ChaCha20Rng;
         type Mine = super::ChaCha20Rng;
-        let mut ref_dest = [0u8; 32];
-        let mut my_dest = [0u8; 32];
+        let mut ref_seed = [0u8; 32];
+        let mut my_seed = [0u8; 32];
         for _ in 0..10 {
-            let ref_rng = &mut Reference::from_seed(ref_dest);
-            let my_rng = &mut Mine::from_seed(my_dest);
-            ref_rng.fill_bytes(&mut ref_dest);
-            my_rng.fill_bytes(&mut my_dest);
-            assert_eq!(ref_dest, my_dest);
+            let ref_rng = &mut Reference::from_seed(ref_seed);
+            let my_rng = &mut Mine::from_seed(my_seed);
+            ref_rng.fill_bytes(&mut ref_seed);
+            my_rng.fill_bytes(&mut my_seed);
+            assert_eq!(ref_seed, my_seed);
+            ref_rng.fill_bytes(&mut ref_seed);
+            my_rng.fill_bytes(&mut my_seed);
+            assert_eq!(ref_seed, my_seed);
+        }
+    }
+
+    #[test]
+    fn dynamic_next_uint_test() {
+        type Reference = super::super::ChaCha20Rng;
+        type Mine = super::ChaCha20Rng;
+        let mut seed = [0u8; 32];
+        let ref_rng = &mut Reference::from_seed(seed);
+        ref_rng.fill_bytes(&mut seed);
+        let my_rng = &mut Mine::from_seed(seed);
+        let ref_rng = &mut Reference::from_seed(seed);
+        for _ in 0..10 {
+            assert_eq!(ref_rng.next_u32(), my_rng.next_u32());
+            assert_eq!(ref_rng.next_u64(), my_rng.next_u64());
         }
     }
 }
