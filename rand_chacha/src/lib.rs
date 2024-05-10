@@ -13,7 +13,7 @@
     html_favicon_url = "https://www.rust-lang.org/favicon.ico",
     html_root_url = "https://rust-random.github.io/rand/"
 )]
-#![forbid(unsafe_code)]
+// #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(missing_debug_implementations)]
 #![doc(test(attr(allow(unused_variables), deny(warnings))))]
@@ -23,6 +23,7 @@ pub use rand_core;
 
 mod chacha;
 mod guts;
+mod my_chacha;
 
 pub use crate::chacha::{
     ChaCha12Core, ChaCha12Rng, ChaCha20Core, ChaCha20Rng, ChaCha8Core, ChaCha8Rng,
