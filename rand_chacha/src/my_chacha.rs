@@ -119,9 +119,6 @@ impl BlockRng {
     }
 }
 pub fn fill_via_u32_chunks(src: &mut [u32], dest: &mut [u8]) -> (usize, usize) {
-    // fill_via_chunks(src, dest)
-    // }
-    // fn fill_via_chunks<T: Observable>(src: &mut [T], dest: &mut [u8]) -> (usize, usize) {
     let size = core::mem::size_of::<u32>();
     let byte_len = core::cmp::min(core::mem::size_of_val(src), dest.len());
     let num_chunks = (byte_len + size - 1) / size;
@@ -150,37 +147,6 @@ fn as_bytes(item: &[u32]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(slf.cast::<u8>(), len) }
 }
 
-impl ChaCha {
-    pub fn new(key: &[u8; 32], nonce: &[u8]) -> Self {
-        init_chacha(key, nonce)
-    }
-}
-
-fn init_chacha(key: &[u8; 32], nonce: &[u8]) -> ChaCha {
-    let ctr_nonce = [
-        0,
-        if nonce.len() == 12 {
-            read_u32le(&nonce[0..4])
-        } else {
-            0
-        },
-        read_u32le(&nonce[nonce.len() - 8..nonce.len() - 4]),
-        read_u32le(&nonce[nonce.len() - 4..]),
-    ];
-    let key0 = u32x4_generic::read_le(&key[..16]);
-    let key1 = u32x4_generic::read_le(&key[16..]);
-    ChaCha {
-        b: key0.into(),
-        c: key1.into(),
-        d: ctr_nonce.into(),
-    }
-}
-
-fn read_u32le(xs: &[u8]) -> u32 {
-    assert_eq!(xs.len(), 4);
-    u32::from(xs[0]) | (u32::from(xs[1]) << 8) | (u32::from(xs[2]) << 16) | (u32::from(xs[3]) << 24)
-}
-
 #[derive(Clone)]
 pub struct ChaCha {
     pub(crate) b: vec128_storage,
@@ -188,9 +154,34 @@ pub struct ChaCha {
     pub(crate) d: vec128_storage,
 }
 impl ChaCha {
+    pub fn new(key: &[u8; 32], nonce: &[u8]) -> Self {
+        let ctr_nonce = [
+            0,
+            if nonce.len() == 12 {
+                read_u32le(&nonce[0..4])
+            } else {
+                0
+            },
+            read_u32le(&nonce[nonce.len() - 8..nonce.len() - 4]),
+            read_u32le(&nonce[nonce.len() - 4..]),
+        ];
+        let key0 = u32x4_generic::read_le(&key[..16]);
+        let key1 = u32x4_generic::read_le(&key[16..]);
+        ChaCha {
+            b: key0.into(),
+            c: key1.into(),
+            d: ctr_nonce.into(),
+        }
+    }
+
     pub fn refill4(&mut self, drounds: u32, out: &mut [u32; BUFSZ]) {
         unsafe { refill_wide_impl(self, drounds, out) }
     }
+}
+
+fn read_u32le(xs: &[u8]) -> u32 {
+    assert_eq!(xs.len(), 4);
+    u32::from(xs[0]) | (u32::from(xs[1]) << 8) | (u32::from(xs[2]) << 16) | (u32::from(xs[3]) << 24)
 }
 
 unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUFSZ]) {
