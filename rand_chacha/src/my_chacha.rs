@@ -14,24 +14,6 @@ pub trait Store<S> {
     unsafe fn unpack(p: S) -> Self;
 }
 
-pub struct Array64<T>([T; 64]);
-impl<T> Array64<T> {
-    fn as_ref(&self) -> &[T] {
-        &self.0
-    }
-    fn as_mut(&mut self) -> &mut [T] {
-        &mut self.0
-    }
-}
-impl<T> Default for Array64<T>
-where
-    T: Default + Copy,
-{
-    fn default() -> Self {
-        Self([T::default(); 64])
-    }
-}
-
 pub struct ChaCha20Core {
     pub state: ChaCha,
 }
@@ -47,7 +29,6 @@ impl ChaCha20Rng {
             rng: BlockRng::new(core),
         }
     }
-    // }
 
     // impl RngCore for ChaCha20Rng {
     //     #[inline]
@@ -67,7 +48,7 @@ impl ChaCha20Rng {
 }
 
 pub struct BlockRng {
-    results: Array64<u32>,
+    results: [u32; 64],
     index: usize,
     /// The *core* part of the RNG, implementing the `generate` function.
     pub core: ChaCha20Core,
@@ -75,7 +56,7 @@ pub struct BlockRng {
 
 impl BlockRng {
     pub fn new(core: ChaCha20Core) -> BlockRng {
-        let results_empty = Array64::<u32>::default();
+        let results_empty = [u32::default(); 64];
         BlockRng {
             core,
             index: results_empty.as_ref().len(),
@@ -662,8 +643,8 @@ impl ChaCha20Core {
         }
     }
 
-    fn generate(&mut self, r: &mut Array64<u32>) {
-        self.state.refill4(rounds, &mut r.0);
+    fn generate(&mut self, r: &mut [u32; 64]) {
+        self.state.refill4(rounds, r);
     }
 }
 
