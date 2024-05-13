@@ -14,8 +14,8 @@
     html_root_url = "https://rust-random.github.io/rand/"
 )]
 // #![forbid(unsafe_code)]
-#![deny(missing_docs)]
-#![deny(missing_debug_implementations)]
+// #![deny(missing_docs)]
+// #![deny(missing_debug_implementations)]
 #![doc(test(attr(allow(unused_variables), deny(warnings))))]
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -23,7 +23,9 @@ pub use rand_core;
 
 mod chacha;
 mod guts;
-mod my_chacha;
+#[allow(non_camel_case_types)]
+#[allow(non_upper_case_globals)]
+pub mod my_chacha;
 
 pub use crate::chacha::{
     ChaCha12Core, ChaCha12Rng, ChaCha20Core, ChaCha20Rng, ChaCha8Core, ChaCha8Rng,
