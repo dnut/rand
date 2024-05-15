@@ -12,13 +12,6 @@ mod const_calculator {
 }
 const BUFSZ: usize = const_calculator::BUFSZ64 as usize;
 
-pub trait Store<S> {
-    /// # Safety
-    /// Caller must ensure the type of Self is appropriate for the hardware of the execution
-    /// environment.
-    unsafe fn unpack(p: S) -> Self;
-}
-
 pub struct ChaCha20Core {
     pub state: ChaCha,
 }
@@ -154,9 +147,9 @@ fn as_bytes(item: &[u32]) -> &[u8] {
 
 #[derive(Clone)]
 pub struct ChaCha {
-    pub(crate) b: vec128,
-    pub(crate) c: vec128,
-    pub(crate) d: vec128,
+    pub(crate) b: [u32; 4],
+    pub(crate) c: [u32; 4],
+    pub(crate) d: [u32; 4],
 }
 impl ChaCha {
     pub fn new(key: &[u8; 32], nonce: &[u8]) -> Self {
@@ -173,9 +166,9 @@ impl ChaCha {
         let key0 = u32x4::read_le(&key[..16]);
         let key1 = u32x4::read_le(&key[16..]);
         ChaCha {
-            b: key0.into(),
-            c: key1.into(),
-            d: ctr_nonce.into(),
+            b: key0.0,
+            c: key1.0,
+            d: ctr_nonce,
         }
     }
 
@@ -190,16 +183,13 @@ fn read_u32le(xs: &[u8]) -> u32 {
 }
 
 unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUFSZ]) {
-    // let k = m.vec([0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
     let k = u32x4([0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
-    // let b = m.unpack(state.b);
-    let b = u32x4(state.b.d);
-    // let c = m.unpack(state.c);
-    let c = u32x4(state.c.d);
+    let b = u32x4(state.b);
+    let c = u32x4(state.c);
     let mut x = State {
-        a: u32x4x4::new([k, k, k, k]),
-        b: u32x4x4::new([b, b, b, b]),
-        c: u32x4x4::new([c, c, c, c]),
+        a: x4([k, k, k, k]),
+        b: x4([b, b, b, b]),
+        c: x4([c, c, c, c]),
         d: d0123(state.d),
     };
     for _ in 0..drounds {
@@ -209,18 +199,18 @@ unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUF
         x = undiagonalize(x); // 3831485001
         x = x;
     }
-    let kk = u32x4x4::new([k, k, k, k]);
-    let sb = u32x4(state.b.d);
-    let sb = u32x4x4::new([sb, sb, sb, sb]);
-    let sc = u32x4(state.c.d);
-    let sc = u32x4x4::new([sc, sc, sc, sc]);
+    let kk = x4([k, k, k, k]);
+    let sb = u32x4(state.b);
+    let sb = x4([sb, sb, sb, sb]);
+    let sc = u32x4(state.c);
+    let sc = x4([sc, sc, sc, sc]);
     let sd = d0123(state.d);
     let results = u32x4x4::transpose4(x.a + kk, x.b + sb, x.c + sc, x.d + sd);
     out[0..16].copy_from_slice(&results.0.to_scalars());
     out[16..32].copy_from_slice(&results.1.to_scalars());
     out[32..48].copy_from_slice(&results.2.to_scalars());
     out[48..64].copy_from_slice(&results.3.to_scalars());
-    state.d = add_pos(sd.0[0], 4).into();
+    state.d = add_pos(sd.0[0].0, 4).into();
 }
 
 #[derive(Clone)]
@@ -233,13 +223,13 @@ pub struct State<V> {
 
 #[inline(always)]
 pub(crate) fn round(mut x: State<u32x4x4>) -> State<u32x4x4> {
-    x.a += x.b;
+    x.a = x4(wrapping_add_inner_tupled(x.a.0, x.b.0));
     x.d = rotate_each_word_right_x4(x.d ^ x.a, 16);
-    x.c += x.d;
+    x.c = x4(wrapping_add_inner_tupled(x.c.0, x.d.0));
     x.b = rotate_each_word_right_x4(x.b ^ x.c, 20);
-    x.a += x.b;
+    x.a = x4(wrapping_add_inner_tupled(x.a.0, x.b.0));
     x.d = rotate_each_word_right_x4(x.d ^ x.a, 24);
-    x.c += x.d;
+    x.c = x4(wrapping_add_inner_tupled(x.c.0, x.d.0));
     x.b = rotate_each_word_right_x4(x.b ^ x.c, 25);
     x
 }
@@ -297,79 +287,43 @@ fn d0123<Mach: Machine>(m: Mach, d: vec128) -> Mach::u32x4x4 {
 // so on LE platforms we can use native vector ops to increment it.
 #[inline(always)]
 #[cfg(target_endian = "little")]
-fn add_pos(d: u32x4, i: u64) -> u32x4 {
-    let d0: u64x2 = to_u64x2(d);
-    let incr = u64x2([i, 0]);
-    let sum = d0 + incr;
-    to_u32x4(sum)
+fn add_pos(d: [u32; 4], i: u64) -> [u32; 4] {
+    vaporize(map2(condense(d), [i, 0], u64::wrapping_add))
 }
 
 #[inline(always)]
 #[cfg(target_endian = "little")]
-fn d0123(d: vec128) -> u32x4x4 {
-    let d0: u64x2 = unsafe { u64x2(d.q) };
-    let incr = u64x2x4::new([u64x2([0, 0]), u64x2([1, 0]), u64x2([2, 0]), u64x2([3, 0])]);
-    let x = u64x2x4::new([d0, d0, d0, d0]) + incr;
-    unsafe {
-        u32x4x4::new([
-            u32x4(vec128 { q: x.0[0].0 }.d),
-            u32x4(vec128 { q: x.0[1].0 }.d),
-            u32x4(vec128 { q: x.0[2].0 }.d),
-            u32x4(vec128 { q: x.0[3].0 }.d),
-        ])
-    }
+fn d0123(d: [u32; 4]) -> u32x4x4 {
+    let condensed = condense(d);
+
+    x4([
+        u32x4(vaporize(map2(condensed, [0, 0], u64::wrapping_add))),
+        u32x4(vaporize(map2(condensed, [1, 0], u64::wrapping_add))),
+        u32x4(vaporize(map2(condensed, [2, 0], u64::wrapping_add))),
+        u32x4(vaporize(map2(condensed, [3, 0], u64::wrapping_add))),
+    ])
 }
 
 //////////////////////////////////////
 
-impl From<[u32; 4]> for vec128 {
-    #[inline(always)]
-    fn from(d: [u32; 4]) -> Self {
-        Self { d }
-    }
-}
-
-impl From<u32x4> for vec128 {
-    #[inline(always)]
-    fn from(d: u32x4) -> Self {
-        Self { d: d.0 }
-    }
-}
-
-fn to_u64x2(input: u32x4) -> u64x2 {
-    u64x2(unsafe { vec128 { d: input.0 }.q })
-}
-
-fn to_u32x4(input: u64x2) -> u32x4 {
-    u32x4(unsafe { vec128 { q: input.0 }.d })
-}
-
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct u32x4([u32; 4]);
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct u64x2([u64; 2]);
+impl u32x4 {
+    fn read_le(input: &[u8]) -> Self {
+        assert_eq!(input.len(), 16);
+        let x: u32x4 =
+            unsafe { core::mem::transmute(core::ptr::read(input as *const _ as *const [u8; 16])) };
 
-impl Add for u32x4 {
-    type Output = u32x4;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        Self(map2(self.0, rhs.0, u32::wrapping_add))
+        u32x4(map(x.0, |x| x.to_le()))
     }
 }
 
-impl Add for u64x2 {
-    type Output = u64x2;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        u64x2(map2(self.0, rhs.0, u64::wrapping_add))
-    }
+fn wrapping_add_inner_tupled(a: [u32x4; 4], b: [u32x4; 4]) -> [u32x4; 4] {
+    map2(a, b, |ai, bi| u32x4(map2(ai.0, bi.0, u32::wrapping_add)))
 }
-
-impl AddAssign for u32x4 {
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
+fn wrapping_add_inner(a: [[u32; 4]; 4], b: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
+    map2(a, b, |ai, bi| map2(ai, bi, u32::wrapping_add))
 }
 
 impl<W> AddAssign for x4<W>
@@ -383,7 +337,7 @@ where
 impl BitXor for u32x4 {
     type Output = Self;
     fn bitxor(self, rhs: Self) -> Self::Output {
-        omap2(self, rhs, |x, y| x ^ y)
+        u32x4(omap2(self.0, rhs.0, |x, y| x ^ y))
     }
 }
 impl<W> BitXor for x4<W>
@@ -401,27 +355,19 @@ where
     }
 }
 
-pub type u64x2x4 = x4<u64x2>;
 pub type u32x4x4 = x4<u32x4>;
 
 #[derive(Clone, Copy)]
 pub struct x4<W>(pub [W; 4]);
 
-impl<W> Add for x4<W>
-where
-    W: Copy + Add<Output = W>,
-{
+impl Add for x4<u32x4> {
     type Output = Self;
 
     fn add(self, rhs: Self) -> Self::Output {
-        x4::<W>([
-            self.0[0] + rhs.0[0],
-            self.0[1] + rhs.0[1],
-            self.0[2] + rhs.0[2],
-            self.0[3] + rhs.0[3],
-        ])
+        x4(wrapping_add_inner_tupled(self.0, rhs.0))
     }
 }
+
 impl<W: Copy> x4<W> {
     #[inline(always)]
     fn transpose4(a: Self, b: Self, c: Self, d: Self) -> (Self, Self, Self, Self)
@@ -444,7 +390,7 @@ impl u32x4 {
     }
     #[inline(always)]
     fn swap64(self) -> Self {
-        omap(self, |x| (x << 64) | (x >> 64))
+        u32x4(omap(self.0, |x| (x << 64) | (x >> 64)))
     }
     #[inline(always)]
     fn shuffle_lane_words1230(self) -> Self {
@@ -457,6 +403,7 @@ impl u32x4 {
         Self([x[1], x[2], x[3], x[0]])
     }
 }
+
 impl u32x4x4 {
     #[inline(always)]
     fn shuffle_lane_words2301(self) -> Self {
@@ -503,79 +450,43 @@ impl u32x4x4 {
     }
 }
 
-fn omap<T, F>(a: T, f: F) -> T
+fn omap<F>(a: [u32; 4], f: F) -> [u32; 4]
 where
-    T: Store<vec128> + Into<vec128>,
     F: Fn(u128) -> u128,
 {
-    let a: vec128 = a.into();
-    let ao = o_of_q(unsafe { a.q });
-    let o = vec128 { q: q_of_o(f(ao)) };
-    unsafe { T::unpack(o) }
+    let ao = freeze(condense(a));
+    vaporize(melt(f(ao)))
 }
 
-fn omap2<T, F>(a: T, b: T, f: F) -> T
+fn omap2<F>(a: [u32; 4], b: [u32; 4], f: F) -> [u32; 4]
 where
-    T: Store<vec128> + Into<vec128>,
     F: Fn(u128, u128) -> u128,
 {
-    let a: vec128 = a.into();
-    let b: vec128 = b.into();
-    let ao = o_of_q(unsafe { a.q });
-    let bo = o_of_q(unsafe { b.q });
-    let o = vec128 {
-        q: q_of_o(f(ao, bo)),
-    };
-    unsafe { T::unpack(o) }
+    let ao = freeze(condense(a));
+    let bo = freeze(condense(b));
+    vaporize(melt(f(ao, bo)))
 }
 
-fn o_of_q(q: [u64; 2]) -> u128 {
+fn freeze(q: [u64; 2]) -> u128 {
     u128::from(q[0]) | (u128::from(q[1]) << 64)
 }
-fn q_of_o(o: u128) -> [u64; 2] {
+
+fn melt(o: u128) -> [u64; 2] {
     [o as u64, (o >> 64) as u64]
 }
 
-impl From<[u64; 2]> for vec128 {
-    fn from(q: [u64; 2]) -> Self {
-        Self { q }
-    }
+fn condense(input: [u32; 4]) -> [u64; 2] {
+    unsafe { vec128 { d: input }.q }
 }
 
-impl<W> x4<W> {
-    pub fn new(inner: [W; 4]) -> Self {
-        Self(inner)
-    }
+fn vaporize(input: [u64; 2]) -> [u32; 4] {
+    unsafe { vec128 { q: input }.d }
 }
 
-impl u32x4 {
-    fn read_le(input: &[u8]) -> Self {
-        assert_eq!(input.len(), 16);
-        let x: u32x4 =
-            unsafe { core::mem::transmute(core::ptr::read(input as *const _ as *const [u8; 16])) };
-
-        u32x4(map(x.0, |x| x.to_le()))
-    }
-
-    // fn read_le(input: &[u8]) -> Self {
-    //     assert_eq!(input.len(), 16);
-    //     let x: [u32; 4] = unsafe {
-    //         core::mem::transmute(core::ptr::read(input as *const _ as *const [u8; 16]))
-    //     };
-    //     Self([x[0].to_le(), x[1].to_le(), x[2].to_le(), x[3].to_le()])
-    // }
-}
-impl Store<vec128> for u32x4 {
-    #[inline(always)]
-    unsafe fn unpack(s: vec128) -> Self {
-        Self(s.d)
-    }
-}
-impl Store<vec128> for u64x2 {
-    #[inline(always)]
-    unsafe fn unpack(s: vec128) -> Self {
-        Self(s.q)
-    }
+#[repr(C)]
+union vec128 {
+    d: [u32; 4],
+    q: [u64; 2],
 }
 
 fn map<T, F, const N: usize>(a: [T; N], f: F) -> [T; N]
@@ -597,13 +508,6 @@ where
         .collect::<Vec<_>>()
         .try_into()
         .unwrap()
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union vec128 {
-    d: [u32; 4],
-    q: [u64; 2],
 }
 
 const rounds: u32 = 10;
