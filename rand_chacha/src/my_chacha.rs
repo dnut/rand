@@ -170,7 +170,7 @@ impl ChaCha {
     }
 
     pub fn refill4(&mut self, drounds: u32, out: &mut [u32; BUFSZ]) {
-        unsafe { refill_wide_impl(self, drounds, out) }
+        refill_wide_impl(self, drounds, out)
     }
 }
 
@@ -179,7 +179,7 @@ fn read_u32le(xs: &[u8]) -> u32 {
     u32::from(xs[0]) | (u32::from(xs[1]) << 8) | (u32::from(xs[2]) << 16) | (u32::from(xs[3]) << 24)
 }
 
-unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUFSZ]) {
+fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUFSZ]) {
     let k = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
     let b = state.b;
     let c = state.c;
@@ -190,32 +190,25 @@ unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUF
         d: d0123(state.d),
     };
     for _ in 0..drounds {
-        x = round(x); // 3079110635
-        x = diagonalize(x); // 3079110635
-        x = round(x); // 3831485001
-        x = undiagonalize(x); // 3831485001
-        x = x;
+        x = undiagonalize(round(diagonalize(round(x))));
     }
-    let kk = [k, k, k, k];
     let sb = state.b;
-    let sb = [sb, sb, sb, sb];
     let sc = state.c;
-    let sc = [sc, sc, sc, sc];
     let sd = d0123(state.d);
     let results = transpose4(
-        wrapping_add_inner(x.a, kk),
-        wrapping_add_inner(x.b, sb),
-        wrapping_add_inner(x.c, sc),
-        wrapping_add_inner(x.d, sd),
+        nested_map_wrapping_add(x.a, [k, k, k, k]),
+        nested_map_wrapping_add(x.b, [sb, sb, sb, sb]),
+        nested_map_wrapping_add(x.c, [sc, sc, sc, sc]),
+        nested_map_wrapping_add(x.d, sd),
     );
-    out[0..16].copy_from_slice(&to_scalars(results.0));
-    out[16..32].copy_from_slice(&to_scalars(results.1));
-    out[32..48].copy_from_slice(&to_scalars(results.2));
-    out[48..64].copy_from_slice(&to_scalars(results.3));
+    out[0..16].copy_from_slice(&concat(results.0));
+    out[16..32].copy_from_slice(&concat(results.1));
+    out[32..48].copy_from_slice(&concat(results.2));
+    out[48..64].copy_from_slice(&concat(results.3));
     state.d = add_pos(sd[0], 4).into();
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct State {
     pub(crate) a: [[u32; 4]; 4],
     pub(crate) b: [[u32; 4]; 4],
@@ -225,25 +218,17 @@ pub struct State {
 
 #[inline(always)]
 pub(crate) fn round(mut x: State) -> State {
-    x.a = wrapping_add_inner(x.a, x.b);
-    x.d = rotate_each_word_right_x4(bitxor_x4(x.d, x.a), 16);
-    x.c = wrapping_add_inner(x.c, x.d);
-    x.b = rotate_each_word_right_x4(bitxor_x4(x.b, x.c), 20);
-    x.a = wrapping_add_inner(x.a, x.b);
-    x.d = rotate_each_word_right_x4(bitxor_x4(x.d, x.a), 24);
-    x.c = wrapping_add_inner(x.c, x.d);
-    x.b = rotate_each_word_right_x4(bitxor_x4(x.b, x.c), 25);
+    x.a = nested_map_wrapping_add(x.a, x.b);
+    x.d = map(bitxor_x4(x.d, x.a), |y| rotate_each_word_right(y, 16));
+    x.c = nested_map_wrapping_add(x.c, x.d);
+    x.b = map(bitxor_x4(x.b, x.c), |y| rotate_each_word_right(y, 20));
+    x.a = nested_map_wrapping_add(x.a, x.b);
+    x.d = map(bitxor_x4(x.d, x.a), |y| rotate_each_word_right(y, 24));
+    x.c = nested_map_wrapping_add(x.c, x.d);
+    x.b = map(bitxor_x4(x.b, x.c), |y| rotate_each_word_right(y, 25));
     x
 }
 
-fn rotate_each_word_right_x4(array: [[u32; 4]; 4], n: u32) -> [[u32; 4]; 4] {
-    [
-        rotate_each_word_right(array[0], n),
-        rotate_each_word_right(array[1], n),
-        rotate_each_word_right(array[2], n),
-        rotate_each_word_right(array[3], n),
-    ]
-}
 fn rotate_each_word_right(array: [u32; 4], n: u32) -> [u32; 4] {
     map(array, |x| x.rotate_right(n))
 }
@@ -297,7 +282,6 @@ fn add_pos(d: [u32; 4], i: u64) -> [u32; 4] {
 #[cfg(target_endian = "little")]
 fn d0123(d: [u32; 4]) -> [[u32; 4]; 4] {
     let condensed = condense(d);
-
     [
         vaporize(map2(condensed, [0, 0], u64::wrapping_add)),
         vaporize(map2(condensed, [1, 0], u64::wrapping_add)),
@@ -316,15 +300,12 @@ fn read_le(input: &[u8]) -> [u32; 4] {
     map(x, |x| x.to_le())
 }
 
-fn wrapping_add_inner(a: [[u32; 4]; 4], b: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
+fn nested_map_wrapping_add(a: [[u32; 4]; 4], b: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
     map2(a, b, |ai, bi| map2(ai, bi, u32::wrapping_add))
 }
 
-fn bitxor(lhs: [u32; 4], rhs: [u32; 4]) -> [u32; 4] {
-    omap2(lhs, rhs, |x, y| x ^ y)
-}
 fn bitxor_x4(lhs: [[u32; 4]; 4], rhs: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
-    map2(lhs, rhs, |a, b| bitxor(a, b))
+    map2(lhs, rhs, |a, b| sublimate(deposit(a) ^ deposit(b)))
 }
 
 fn transpose4(
@@ -345,22 +326,20 @@ where
 }
 
 fn shuffle_lane_words2301(item: [u32; 4]) -> [u32; 4] {
-    swap64(item)
+    [item[2], item[3], item[0], item[1]]
 }
 
-fn swap64(item: [u32; 4]) -> [u32; 4] {
-    omap(item, |x| (x << 64) | (x >> 64))
-}
-
+/// NOTE: misnomer
 fn shuffle_lane_words1230(item: [u32; 4]) -> [u32; 4] {
     [item[3], item[0], item[1], item[2]]
 }
 
+/// NOTE: misnomer
 fn shuffle_lane_words3012(item: [u32; 4]) -> [u32; 4] {
     [item[1], item[2], item[3], item[0]]
 }
 
-fn to_scalars(x4x4: [[u32; 4]; 4]) -> [u32; 16] {
+fn concat(x4x4: [[u32; 4]; 4]) -> [u32; 16] {
     let [a, b, c, d] = x4x4;
     [
         a[0], a[1], a[2], a[3], //
@@ -370,43 +349,40 @@ fn to_scalars(x4x4: [[u32; 4]; 4]) -> [u32; 16] {
     ]
 }
 
-fn omap<F>(a: [u32; 4], f: F) -> [u32; 4]
-where
-    F: Fn(u128) -> u128,
-{
-    let ao = freeze(condense(a));
-    vaporize(melt(f(ao)))
+fn deposit(gas: [u32; 4]) -> u128 {
+    unsafe { vec128 { gas }.solid }
 }
 
-fn omap2<F>(a: [u32; 4], b: [u32; 4], f: F) -> [u32; 4]
-where
-    F: Fn(u128, u128) -> u128,
-{
-    let ao = freeze(condense(a));
-    let bo = freeze(condense(b));
-    vaporize(melt(f(ao, bo)))
+fn sublimate(solid: u128) -> [u32; 4] {
+    unsafe { vec128 { solid }.gas }
 }
 
-fn freeze(q: [u64; 2]) -> u128 {
-    u128::from(q[0]) | (u128::from(q[1]) << 64)
+fn condense(gas: [u32; 4]) -> [u64; 2] {
+    unsafe { vec128 { gas }.liquid }
 }
 
-fn melt(o: u128) -> [u64; 2] {
-    [o as u64, (o >> 64) as u64]
+fn vaporize(liquid: [u64; 2]) -> [u32; 4] {
+    unsafe { vec128 { liquid }.gas }
 }
 
-fn condense(input: [u32; 4]) -> [u64; 2] {
-    unsafe { vec128 { d: input }.q }
-}
-
-fn vaporize(input: [u64; 2]) -> [u32; 4] {
-    unsafe { vec128 { q: input }.d }
+#[test]
+fn thing() {
+    let gas = [u32::MAX / 2, u32::MAX / 5, u32::MAX / 7, u32::MAX / 11];
+    let liquid = condense(gas);
+    let solid = deposit(gas);
+    let expected_liquid = [3689348816030400511, 1676976733025356068];
+    let expected_solid = 30934760611684291960695475747055206399;
+    assert_eq!(expected_liquid, liquid);
+    assert_eq!(expected_solid, solid);
+    assert_eq!(gas, vaporize(liquid));
+    assert_eq!(gas, sublimate(solid));
 }
 
 #[repr(C)]
 union vec128 {
-    d: [u32; 4],
-    q: [u64; 2],
+    solid: u128,
+    liquid: [u64; 2],
+    gas: [u32; 4],
 }
 
 fn map<T, F, const N: usize>(a: [T; N], f: F) -> [T; N]
@@ -432,7 +408,6 @@ where
 
 const rounds: u32 = 10;
 impl ChaCha20Core {
-    #[inline]
     fn from_seed(seed: [u8; 32]) -> Self {
         ChaCha20Core {
             state: ChaCha::new(&seed, &[0u8; 8]),
@@ -446,6 +421,8 @@ impl ChaCha20Core {
 
 mod test {
     use rand_core::{RngCore, SeedableRng};
+
+    use crate::my_chacha::{round, State};
 
     #[test]
     fn hardcoded_fill_bytes_test() {
@@ -488,9 +465,61 @@ mod test {
         ref_rng.fill_bytes(&mut seed);
         let my_rng = &mut Mine::from_seed(seed);
         let ref_rng = &mut Reference::from_seed(seed);
-        for _ in 0..10 {
+        for _ in 0..1000 {
             assert_eq!(ref_rng.next_u32(), my_rng.next_u32());
             assert_eq!(ref_rng.next_u64(), my_rng.next_u64());
         }
+    }
+
+    #[test]
+    fn round_works() {
+        let start = State {
+            a: [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9, 10, 11], [12, 13, 14, 15]],
+            b: [
+                [16, 17, 18, 19],
+                [20, 21, 22, 23],
+                [24, 25, 26, 27],
+                [28, 29, 30, 31],
+            ],
+            c: [
+                [32, 33, 34, 35],
+                [36, 37, 38, 39],
+                [40, 41, 42, 43],
+                [44, 45, 46, 47],
+            ],
+            d: [
+                [48, 49, 50, 51],
+                [52, 53, 54, 55],
+                [56, 57, 58, 59],
+                [60, 61, 62, 63],
+            ],
+        };
+        let expected = State {
+            a: [
+                [196626, 805502996, 1610809366, 1342373912],
+                [3221422106, 4026728476, 2684551198, 2416115744],
+                [2147680289, 2952986659, 3758293029, 3489857575],
+                [1073938473, 1879244843, 537067565, 268632111],
+            ],
+            b: [
+                [2441679121, 269101448, 2458599458, 319568059],
+                [2542629751, 370052078, 2492424772, 353393373],
+                [2375079117, 202501204, 2391999998, 252968295],
+                [2341779115, 169201202, 2291574680, 152542977],
+            ],
+            c: [
+                [589304352, 539169873, 623253122, 639965299],
+                [791419620, 741285141, 690626246, 707338423],
+                [454566312, 404431833, 488515082, 505227259],
+                [387197292, 337062813, 286403918, 303116095],
+            ],
+            d: [
+                [587207168, 536876080, 620762720, 637540432],
+                [788536000, 738204912, 687873696, 704651408],
+                [452993408, 402662320, 486548960, 503326672],
+                [385886528, 335555440, 285224224, 302001936],
+            ],
+        };
+        assert_eq!(expected, round(start));
     }
 }
