@@ -1,7 +1,4 @@
-use core::{
-    fmt::Debug,
-    ops::{Add, AddAssign, BitXor},
-};
+use core::fmt::Debug;
 
 mod const_calculator {
     const BLOCK: usize = 16;
@@ -163,11 +160,11 @@ impl ChaCha {
             read_u32le(&nonce[nonce.len() - 8..nonce.len() - 4]),
             read_u32le(&nonce[nonce.len() - 4..]),
         ];
-        let key0 = u32x4::read_le(&key[..16]);
-        let key1 = u32x4::read_le(&key[16..]);
+        let key0 = read_le(&key[..16]);
+        let key1 = read_le(&key[16..]);
         ChaCha {
-            b: key0.0,
-            c: key1.0,
+            b: key0,
+            c: key1,
             d: ctr_nonce,
         }
     }
@@ -183,13 +180,13 @@ fn read_u32le(xs: &[u8]) -> u32 {
 }
 
 unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUFSZ]) {
-    let k = u32x4([0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
-    let b = u32x4(state.b);
-    let c = u32x4(state.c);
+    let k = [0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574];
+    let b = state.b;
+    let c = state.c;
     let mut x = State {
-        a: x4([k, k, k, k]),
-        b: x4([b, b, b, b]),
-        c: x4([c, c, c, c]),
+        a: [k, k, k, k],
+        b: [b, b, b, b],
+        c: [c, c, c, c],
         d: d0123(state.d),
     };
     for _ in 0..drounds {
@@ -199,65 +196,70 @@ unsafe fn refill_wide_impl(state: &mut ChaCha, drounds: u32, out: &mut [u32; BUF
         x = undiagonalize(x); // 3831485001
         x = x;
     }
-    let kk = x4([k, k, k, k]);
-    let sb = u32x4(state.b);
-    let sb = x4([sb, sb, sb, sb]);
-    let sc = u32x4(state.c);
-    let sc = x4([sc, sc, sc, sc]);
+    let kk = [k, k, k, k];
+    let sb = state.b;
+    let sb = [sb, sb, sb, sb];
+    let sc = state.c;
+    let sc = [sc, sc, sc, sc];
     let sd = d0123(state.d);
-    let results = u32x4x4::transpose4(x.a + kk, x.b + sb, x.c + sc, x.d + sd);
-    out[0..16].copy_from_slice(&results.0.to_scalars());
-    out[16..32].copy_from_slice(&results.1.to_scalars());
-    out[32..48].copy_from_slice(&results.2.to_scalars());
-    out[48..64].copy_from_slice(&results.3.to_scalars());
-    state.d = add_pos(sd.0[0].0, 4).into();
+    let results = transpose4(
+        wrapping_add_inner(x.a, kk),
+        wrapping_add_inner(x.b, sb),
+        wrapping_add_inner(x.c, sc),
+        wrapping_add_inner(x.d, sd),
+    );
+    out[0..16].copy_from_slice(&to_scalars(results.0));
+    out[16..32].copy_from_slice(&to_scalars(results.1));
+    out[32..48].copy_from_slice(&to_scalars(results.2));
+    out[48..64].copy_from_slice(&to_scalars(results.3));
+    state.d = add_pos(sd[0], 4).into();
 }
 
 #[derive(Clone)]
-pub struct State<V> {
-    pub(crate) a: V,
-    pub(crate) b: V,
-    pub(crate) c: V,
-    pub(crate) d: V,
+pub struct State {
+    pub(crate) a: [[u32; 4]; 4],
+    pub(crate) b: [[u32; 4]; 4],
+    pub(crate) c: [[u32; 4]; 4],
+    pub(crate) d: [[u32; 4]; 4],
 }
 
 #[inline(always)]
-pub(crate) fn round(mut x: State<u32x4x4>) -> State<u32x4x4> {
-    x.a = x4(wrapping_add_inner_tupled(x.a.0, x.b.0));
-    x.d = rotate_each_word_right_x4(x.d ^ x.a, 16);
-    x.c = x4(wrapping_add_inner_tupled(x.c.0, x.d.0));
-    x.b = rotate_each_word_right_x4(x.b ^ x.c, 20);
-    x.a = x4(wrapping_add_inner_tupled(x.a.0, x.b.0));
-    x.d = rotate_each_word_right_x4(x.d ^ x.a, 24);
-    x.c = x4(wrapping_add_inner_tupled(x.c.0, x.d.0));
-    x.b = rotate_each_word_right_x4(x.b ^ x.c, 25);
+pub(crate) fn round(mut x: State) -> State {
+    x.a = wrapping_add_inner(x.a, x.b);
+    x.d = rotate_each_word_right_x4(bitxor_x4(x.d, x.a), 16);
+    x.c = wrapping_add_inner(x.c, x.d);
+    x.b = rotate_each_word_right_x4(bitxor_x4(x.b, x.c), 20);
+    x.a = wrapping_add_inner(x.a, x.b);
+    x.d = rotate_each_word_right_x4(bitxor_x4(x.d, x.a), 24);
+    x.c = wrapping_add_inner(x.c, x.d);
+    x.b = rotate_each_word_right_x4(bitxor_x4(x.b, x.c), 25);
     x
 }
 
-fn rotate_each_word_right_x4(array: u32x4x4, n: u32) -> u32x4x4 {
-    x4([
-        rotate_each_word_right(array.0[0], n),
-        rotate_each_word_right(array.0[1], n),
-        rotate_each_word_right(array.0[2], n),
-        rotate_each_word_right(array.0[3], n),
-    ])
+fn rotate_each_word_right_x4(array: [[u32; 4]; 4], n: u32) -> [[u32; 4]; 4] {
+    [
+        rotate_each_word_right(array[0], n),
+        rotate_each_word_right(array[1], n),
+        rotate_each_word_right(array[2], n),
+        rotate_each_word_right(array[3], n),
+    ]
 }
-fn rotate_each_word_right(array: u32x4, n: u32) -> u32x4 {
-    u32x4(map(array.0, |x| x.rotate_right(n)))
+fn rotate_each_word_right(array: [u32; 4], n: u32) -> [u32; 4] {
+    map(array, |x| x.rotate_right(n))
 }
 
 #[inline(always)]
-pub(crate) fn diagonalize(mut x: State<u32x4x4>) -> State<u32x4x4> {
-    x.b = x.b.shuffle_lane_words3012();
-    x.c = x.c.shuffle_lane_words2301();
-    x.d = x.d.shuffle_lane_words1230();
+pub(crate) fn diagonalize(mut x: State) -> State {
+    x.b = map(x.b, shuffle_lane_words3012);
+    x.c = map(x.c, shuffle_lane_words2301);
+    x.d = map(x.d, shuffle_lane_words1230);
     x
 }
 #[inline(always)]
-pub(crate) fn undiagonalize(mut x: State<u32x4x4>) -> State<u32x4x4> {
-    x.b = x.b.shuffle_lane_words1230();
-    x.c = x.c.shuffle_lane_words2301();
-    x.d = x.d.shuffle_lane_words3012();
+pub(crate) fn undiagonalize(mut x: State) -> State {
+    x.b = map(x.b, shuffle_lane_words1230);
+    x.c = map(x.c, shuffle_lane_words2301);
+    x.d = map(x.d, shuffle_lane_words3012);
     x
 }
 
@@ -293,161 +295,79 @@ fn add_pos(d: [u32; 4], i: u64) -> [u32; 4] {
 
 #[inline(always)]
 #[cfg(target_endian = "little")]
-fn d0123(d: [u32; 4]) -> u32x4x4 {
+fn d0123(d: [u32; 4]) -> [[u32; 4]; 4] {
     let condensed = condense(d);
 
-    x4([
-        u32x4(vaporize(map2(condensed, [0, 0], u64::wrapping_add))),
-        u32x4(vaporize(map2(condensed, [1, 0], u64::wrapping_add))),
-        u32x4(vaporize(map2(condensed, [2, 0], u64::wrapping_add))),
-        u32x4(vaporize(map2(condensed, [3, 0], u64::wrapping_add))),
-    ])
+    [
+        vaporize(map2(condensed, [0, 0], u64::wrapping_add)),
+        vaporize(map2(condensed, [1, 0], u64::wrapping_add)),
+        vaporize(map2(condensed, [2, 0], u64::wrapping_add)),
+        vaporize(map2(condensed, [3, 0], u64::wrapping_add)),
+    ]
 }
 
 //////////////////////////////////////
 
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct u32x4([u32; 4]);
+fn read_le(input: &[u8]) -> [u32; 4] {
+    assert_eq!(input.len(), 16);
+    let x: [u32; 4] =
+        unsafe { core::mem::transmute(core::ptr::read(input as *const _ as *const [u8; 16])) };
 
-impl u32x4 {
-    fn read_le(input: &[u8]) -> Self {
-        assert_eq!(input.len(), 16);
-        let x: u32x4 =
-            unsafe { core::mem::transmute(core::ptr::read(input as *const _ as *const [u8; 16])) };
-
-        u32x4(map(x.0, |x| x.to_le()))
-    }
+    map(x, |x| x.to_le())
 }
 
-fn wrapping_add_inner_tupled(a: [u32x4; 4], b: [u32x4; 4]) -> [u32x4; 4] {
-    map2(a, b, |ai, bi| u32x4(map2(ai.0, bi.0, u32::wrapping_add)))
-}
 fn wrapping_add_inner(a: [[u32; 4]; 4], b: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
     map2(a, b, |ai, bi| map2(ai, bi, u32::wrapping_add))
 }
 
-impl<W> AddAssign for x4<W>
+fn bitxor(lhs: [u32; 4], rhs: [u32; 4]) -> [u32; 4] {
+    omap2(lhs, rhs, |x, y| x ^ y)
+}
+fn bitxor_x4(lhs: [[u32; 4]; 4], rhs: [[u32; 4]; 4]) -> [[u32; 4]; 4] {
+    map2(lhs, rhs, |a, b| bitxor(a, b))
+}
+
+fn transpose4(
+    a: [[u32; 4]; 4],
+    b: [[u32; 4]; 4],
+    c: [[u32; 4]; 4],
+    d: [[u32; 4]; 4],
+) -> ([[u32; 4]; 4], [[u32; 4]; 4], [[u32; 4]; 4], [[u32; 4]; 4])
 where
-    x4<W>: Copy + Add<Output = x4<W>>,
+    [[u32; 4]; 4]: Sized,
 {
-    fn add_assign(&mut self, rhs: Self) {
-        *self = *self + rhs;
-    }
-}
-impl BitXor for u32x4 {
-    type Output = Self;
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        u32x4(omap2(self.0, rhs.0, |x, y| x ^ y))
-    }
-}
-impl<W> BitXor for x4<W>
-where
-    W: Copy + BitXor<Output = W>,
-{
-    type Output = Self;
-    fn bitxor(self, rhs: Self) -> Self::Output {
-        Self([
-            self.0[0].bitxor(rhs.0[0]),
-            self.0[1].bitxor(rhs.0[1]),
-            self.0[2].bitxor(rhs.0[2]),
-            self.0[3].bitxor(rhs.0[3]),
-        ])
-    }
+    (
+        [a[0], b[0], c[0], d[0]],
+        [a[1], b[1], c[1], d[1]],
+        [a[2], b[2], c[2], d[2]],
+        [a[3], b[3], c[3], d[3]],
+    )
 }
 
-pub type u32x4x4 = x4<u32x4>;
-
-#[derive(Clone, Copy)]
-pub struct x4<W>(pub [W; 4]);
-
-impl Add for x4<u32x4> {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        x4(wrapping_add_inner_tupled(self.0, rhs.0))
-    }
+fn shuffle_lane_words2301(item: [u32; 4]) -> [u32; 4] {
+    swap64(item)
 }
 
-impl<W: Copy> x4<W> {
-    #[inline(always)]
-    fn transpose4(a: Self, b: Self, c: Self, d: Self) -> (Self, Self, Self, Self)
-    where
-        Self: Sized,
-    {
-        (
-            x4([a.0[0], b.0[0], c.0[0], d.0[0]]),
-            x4([a.0[1], b.0[1], c.0[1], d.0[1]]),
-            x4([a.0[2], b.0[2], c.0[2], d.0[2]]),
-            x4([a.0[3], b.0[3], c.0[3], d.0[3]]),
-        )
-    }
+fn swap64(item: [u32; 4]) -> [u32; 4] {
+    omap(item, |x| (x << 64) | (x >> 64))
 }
 
-impl u32x4 {
-    #[inline(always)]
-    fn shuffle_lane_words2301(self) -> Self {
-        self.swap64()
-    }
-    #[inline(always)]
-    fn swap64(self) -> Self {
-        u32x4(omap(self.0, |x| (x << 64) | (x >> 64)))
-    }
-    #[inline(always)]
-    fn shuffle_lane_words1230(self) -> Self {
-        let x = self.0;
-        Self([x[3], x[0], x[1], x[2]])
-    }
-    #[inline(always)]
-    fn shuffle_lane_words3012(self) -> Self {
-        let x = self.0;
-        Self([x[1], x[2], x[3], x[0]])
-    }
+fn shuffle_lane_words1230(item: [u32; 4]) -> [u32; 4] {
+    [item[3], item[0], item[1], item[2]]
 }
 
-impl u32x4x4 {
-    #[inline(always)]
-    fn shuffle_lane_words2301(self) -> Self {
-        x4([
-            self.0[0].shuffle_lane_words2301(),
-            self.0[1].shuffle_lane_words2301(),
-            self.0[2].shuffle_lane_words2301(),
-            self.0[3].shuffle_lane_words2301(),
-        ])
-    }
-    #[inline(always)]
-    fn shuffle_lane_words1230(self) -> Self {
-        x4([
-            self.0[0].shuffle_lane_words1230(),
-            self.0[1].shuffle_lane_words1230(),
-            self.0[2].shuffle_lane_words1230(),
-            self.0[3].shuffle_lane_words1230(),
-        ])
-    }
-    #[inline(always)]
-    fn shuffle_lane_words3012(self) -> Self {
-        x4([
-            self.0[0].shuffle_lane_words3012(),
-            self.0[1].shuffle_lane_words3012(),
-            self.0[2].shuffle_lane_words3012(),
-            self.0[3].shuffle_lane_words3012(),
-        ])
-    }
+fn shuffle_lane_words3012(item: [u32; 4]) -> [u32; 4] {
+    [item[1], item[2], item[3], item[0]]
 }
 
-impl u32x4x4 {
-    fn to_scalars(self) -> [u32; 16] {
-        let [a, b, c, d] = self.0;
-        let a = a.0;
-        let b = b.0;
-        let c = c.0;
-        let d = d.0;
-        [
-            a[0], a[1], a[2], a[3], //
-            b[0], b[1], b[2], b[3], //
-            c[0], c[1], c[2], c[3], //
-            d[0], d[1], d[2], d[3], //
-        ]
-    }
+fn to_scalars(x4x4: [[u32; 4]; 4]) -> [u32; 16] {
+    let [a, b, c, d] = x4x4;
+    [
+        a[0], a[1], a[2], a[3], //
+        b[0], b[1], b[2], b[3], //
+        c[0], c[1], c[2], c[3], //
+        d[0], d[1], d[2], d[3], //
+    ]
 }
 
 fn omap<F>(a: [u32; 4], f: F) -> [u32; 4]
